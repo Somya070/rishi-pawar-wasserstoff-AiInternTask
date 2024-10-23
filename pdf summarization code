@@ -1,0 +1,120 @@
+import os
+import requests
+from pymongo import MongoClient
+from concurrent.futures import ProcessPoolExecutor
+from PyPDF2 import PdfReader
+from transformers import pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Initialize the summarization pipeline
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+# MongoDB configuration
+mongo_client = MongoClient("mongodb://localhost:27017/")
+db = mongo_client["summary"]
+collection = db["py"]
+
+# Function to download PDF from URL
+def download_pdf(url, save_path):
+    try:
+        print(f"Attempting to download PDF from {url}")
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded PDF: {save_path}")
+            return save_path
+        else:
+            print(f"Failed to download PDF from {url}, status code: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error downloading PDF: {e}")
+        return None
+
+# Function to extract text from PDF
+def extract_text_from_pdf(pdf_path):
+    try:
+        print(f"Extracting text from {pdf_path}")
+        with open(pdf_path, 'rb') as file:
+            reader = PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+        return text
+    except Exception as e:
+        print(f"Error reading {pdf_path}: {e}")
+        return None
+
+# Function to generate summary
+def generate_summary(text, length='medium'):
+    try:
+        print("Generating summary...")
+        max_length = 150 if length == 'medium' else (50 if length == 'short' else 300)
+        summary = summarizer(text, max_length=max_length, min_length=25, do_sample=False)
+        return summary[0]['summary_text']
+    except Exception as e:
+        print(f"Error summarizing text: {e}")
+        return ""
+
+# Function to extract keywords
+def extract_keywords(text):
+    try:
+        print("Extracting keywords...")
+        vectorizer = TfidfVectorizer(stop_words='english')
+        X = vectorizer.fit_transform([text])
+        features = vectorizer.get_feature_names_out()
+        scores = X.toarray()[0]
+        keywords = [features[i] for i in scores.argsort()[-5:]]
+        return keywords
+    except Exception as e:
+        print(f"Error extracting keywords: {e}")
+        return []
+
+# Function to process a single PDF from URL
+def process_pdf_from_url(url):
+    print(f"Processing URL: {url}")
+    pdf_name = url.split("/")[-1]
+    save_path = os.path.join("downloaded_pdfs", pdf_name)
+   
+    # Create directory if not exists
+    os.makedirs("downloaded_pdfs", exist_ok=True)
+   
+    # Download PDF
+    pdf_path = download_pdf(url, save_path)
+   
+    if pdf_path:
+        # Extract text
+        text = extract_text_from_pdf(pdf_path)
+        if text:
+            # Generate summary
+            summary = generate_summary(text, length='medium')
+            # Extract keywords
+            keywords = extract_keywords(text)
+
+            # Store metadata and results in MongoDB
+            pdf_data = {
+                "name": pdf_name,
+                "url": url,
+                "summary": summary,
+                "keywords": keywords
+            }
+            collection.insert_one(pdf_data)
+            print(f"Successfully processed PDF from {url}")
+        else:
+            print(f"Failed to extract text from {pdf_path}")
+
+# Function to process multiple PDFs from URLs
+def process_pdfs_from_urls(pdf_urls):
+    print("Starting PDF processing for URLs...")
+    with ProcessPoolExecutor() as executor:
+        executor.map(process_pdf_from_url, pdf_urls)
+    print("Processing completed!")
+
+# Example of JSON structure
+pdf_urls = [
+    "https://example.com/sample1.pdf",
+    "https://example.com/sample2.pdf"
+]
+
+# Start the process
+process_pdfs_from_urls(pdf_urls)
